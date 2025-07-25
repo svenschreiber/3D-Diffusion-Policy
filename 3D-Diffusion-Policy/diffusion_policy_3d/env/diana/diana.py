@@ -5,6 +5,7 @@ from gymnasium import utils
 from gymnasium.spaces import Box
 import os
 import numpy as np
+from typing import Union, Dict
 
 DEFAULT_CAMERA_CONFIG = {
     "trackbodyid": -1,
@@ -16,36 +17,45 @@ class DianaEnv(MujocoEnv, utils.EzPickle):
             self,
             xml_file: str = "setup_final_poncho.xml",
             frame_skip: int = 5,
-            default_camera_config: dict[str, float | int] = DEFAULT_CAMERA_CONFIG,
-            reward_near_weight: float = 0.5,
-            reward_dist_weight: float = 1,
-            reward_control_weight: float = 0.1,
+            default_camera_config: Dict[str, Union[float, int]] = DEFAULT_CAMERA_CONFIG,
+            reward_near_weight : float    = 1.0,
+            reward_grip_weight : float    = 0.5,
+            reward_dist_weight : float    = 2.0,
+            reward_lift_weight : float    = 1.0,
+            reward_control_weight : float = 0.001,
             **kwargs,
         ):
         utils.EzPickle.__init__(
+            self,
             xml_file, 
             frame_skip, 
             default_camera_config, 
             reward_near_weight, 
+            reward_grip_weight,
             reward_dist_weight, 
+            reward_lift_weight,
             reward_control_weight, 
             **kwargs
         )
 
         self._reward_near_weight = reward_near_weight
+        self._reward_grip_weight = reward_grip_weight
         self._reward_dist_weight = reward_dist_weight
+        self._reward_lift_weight = reward_lift_weight
         self._reward_control_weight = reward_control_weight
 
-        observation_space = Box(low=-np.inf, high=np.inf, shape=(16,), dtype=np.float64)
         curr_dir = os.path.dirname(os.path.abspath(__file__))
         MujocoEnv.__init__(
             self, 
-            curr_dir+xml_file, 
+            os.path.join(curr_dir, "assets", xml_file), 
             frame_skip, 
-            observation_space=observation_space,
+            observation_space=None,
             default_camera_config=default_camera_config,
             **kwargs,
         )
+
+        obs_dim = (self.model.nq + self.model.nv,)
+        self.observation_space = Box(low=-np.inf, high=np.inf, shape=obs_dim, dtype=np.float64)
 
         self.metadata = {
             "render_modes": [
@@ -66,57 +76,61 @@ class DianaEnv(MujocoEnv, utils.EzPickle):
 
         if self.render_mode == "human":
             self.render()
-        # truncation=False as the time limit is handled by the `TimeLimit` wrapper added during `make`
         return observation, reward, False, False, info
-    
+
     def _get_rew(self, action):
-        vec_1 = self.get_body_com("object") - self.get_body_com("tips_arm")
-        vec_2 = self.get_body_com("object") - self.get_body_com("goal")
+        core_pos = self.get_body_com("cube")
+        arm_r_pos = self.get_body_com("q_gripper_r_finger")
+        goal_pos = self.get_body_com("goal")
 
-        reward_near = -np.linalg.norm(vec_1) * self._reward_near_weight
-        reward_dist = -np.linalg.norm(vec_2) * self._reward_dist_weight
-        reward_ctrl = -np.square(action).sum() * self._reward_control_weight
+        dist_core_arm = np.linalg.norm(core_pos - arm_r_pos)
+        dist_core_goal = np.linalg.norm(core_pos - goal_pos)
+        
+        max_dist = 1.0
 
-        reward = reward_dist + reward_ctrl + reward_near
+        reward_near = self._reward_near_weight * (max_dist - dist_core_arm)
+        reward_dist = self._reward_dist_weight * (max_dist - dist_core_goal)
+        reward_ctrl = -self._reward_control_weight * np.square(action).sum()
+
+        gripper_pos = self.data.qpos[15]
+        desired_closed_pos = 0.04
+        reward_grip = -self._reward_grip_weight * abs(gripper_pos - desired_closed_pos)
+
+        reward = reward_near + reward_dist + reward_ctrl + reward_grip
 
         reward_info = {
             "reward_dist": reward_dist,
             "reward_ctrl": reward_ctrl,
             "reward_near": reward_near,
+            "reward_grip": reward_grip,
         }
 
         return reward, reward_info
-
+    
     def reset_model(self):
         qpos = self.init_qpos
 
-        self.goal_pos = np.asarray([0, 0])
+        self.goal_pos = np.array([0, 0])
+        self.table_pos = self.get_body_com("table")
         while True:
-            self.cylinder_pos = np.concatenate(
+            self.core_pos = np.concatenate(
                 [
-                    self.np_random.uniform(low=-0.3, high=0, size=1),
-                    self.np_random.uniform(low=-0.2, high=0.2, size=1),
+                    self.np_random.uniform(low=-0.4, high=-0.1, size=1),
+                    self.np_random.uniform(low=-0.1, high=0.1, size=1),
                 ]
             )
-            if np.linalg.norm(self.cylinder_pos - self.goal_pos) > 0.17:
+            if np.linalg.norm(self.core_pos - self.goal_pos) > 0.05:
                 break
 
-        qpos[-4:-2] = self.cylinder_pos
-        qpos[-2:] = self.goal_pos
-        qvel = self.init_qvel + self.np_random.uniform(
-            low=-0.005, high=0.005, size=self.model.nv
-        )
-        qvel[-4:] = 0
+        qpos[[18, 19]] = self.core_pos
+        qvel = self.init_qvel
         self.set_state(qpos, qvel)
         return self._get_obs()
 
     def _get_obs(self):
         return np.concatenate(
             [
-                self.data.qpos.flatten()[:7],
-                self.data.qvel.flatten()[:7],
-                self.get_body_com("tips_arm"),
-                self.get_body_com("object"),
-                self.get_body_com("goal"),
+                self.data.qpos.flatten(),
+                self.data.qvel.flatten(),
             ]
         )
