@@ -76,7 +76,7 @@ class DianaEnv(MujocoEnv, utils.EzPickle):
 
         if self.render_mode == "human":
             self.render()
-        return observation, reward, False, False, info
+        return observation, reward, False, observation[20] < -0.2, info
 
     def _get_rew(self, action):
         core_pos = self.get_body_com("cube")
