@@ -1,21 +1,23 @@
 from diffusion_policy_3d.env import DianaEnv
 from gymnasium.wrappers import TimeLimit
-from stable_baselines3 import PPO
+import stable_baselines3 as sb3
 
 env = TimeLimit(DianaEnv(render_mode='human'), max_episode_steps=2000)
 
-model = PPO(
+env = DianaEnv(render_mode='rgb_array')
+action = env.action_space.sample()
+env.step(action)
+print(env.data.geom("table"))
+exit(-1)
+
+model = sb3.PPO(
     policy="MlpPolicy",
     env=env,
-    verbose=1,
-    learning_rate=3e-4,
-    n_steps=2048,
     batch_size=1024,
-    gamma=0.99,
-    device="cpu"
+    verbose=1,
 )
 
-model.learn(total_timesteps=1_000_000)
+model.learn(total_timesteps=10_000_000)
 
 # model.save("dianaenv")
 

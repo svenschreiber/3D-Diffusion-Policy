@@ -21,7 +21,6 @@ class DianaEnv(MujocoEnv, utils.EzPickle):
             reward_near_weight : float    = 1.0,
             reward_grip_weight : float    = 0.5,
             reward_dist_weight : float    = 2.0,
-            reward_lift_weight : float    = 1.0,
             reward_control_weight : float = 0.001,
             **kwargs,
         ):
@@ -33,7 +32,6 @@ class DianaEnv(MujocoEnv, utils.EzPickle):
             reward_near_weight, 
             reward_grip_weight,
             reward_dist_weight, 
-            reward_lift_weight,
             reward_control_weight, 
             **kwargs
         )
@@ -41,7 +39,6 @@ class DianaEnv(MujocoEnv, utils.EzPickle):
         self._reward_near_weight = reward_near_weight
         self._reward_grip_weight = reward_grip_weight
         self._reward_dist_weight = reward_dist_weight
-        self._reward_lift_weight = reward_lift_weight
         self._reward_control_weight = reward_control_weight
 
         curr_dir = os.path.dirname(os.path.abspath(__file__))
@@ -56,6 +53,7 @@ class DianaEnv(MujocoEnv, utils.EzPickle):
 
         obs_dim = (self.model.nq + self.model.nv,)
         self.observation_space = Box(low=-np.inf, high=np.inf, shape=obs_dim, dtype=np.float64)
+        
 
         self.metadata = {
             "render_modes": [
@@ -66,33 +64,38 @@ class DianaEnv(MujocoEnv, utils.EzPickle):
             ],
             "render_fps": int(np.round(1.0 / self.dt)),
         }
+    
+    def cube_out_of_range(self, cube, x_bounds, y_bounds, z_bounds):
+        return not ((cube[0] >= x_bounds[0] and cube[0] < x_bounds[1]) and \
+                    (cube[1] >= y_bounds[0] and cube[1] < y_bounds[1]) and \
+                    (cube[2] >= z_bounds[0] and cube[2] < z_bounds[1]))
 
     def step(self, action):
         self.do_simulation(action, self.frame_skip)
 
         observation = self._get_obs()
-        reward, reward_info = self._get_rew(action)
+        reward, reward_info = self._get_rew(observation)
         info = reward_info
 
         if self.render_mode == "human":
             self.render()
-        return observation, reward, False, observation[20] < -0.2, info
+        return observation, reward, False, self.cube_out_of_range(observation[10:13], [-0.5, 0.2], [-0.2, 0.2], [-0.2, 2]), info
 
     def _get_rew(self, action):
-        core_pos = self.get_body_com("cube")
+        cube_pos = self.get_body_com("cube")
         arm_r_pos = self.get_body_com("q_gripper_r_finger")
         goal_pos = self.get_body_com("goal")
 
-        dist_core_arm = np.linalg.norm(core_pos - arm_r_pos)
-        dist_core_goal = np.linalg.norm(core_pos - goal_pos)
+        dist_cube_arm = np.linalg.norm(cube_pos - arm_r_pos)
+        dist_cube_goal = np.linalg.norm(cube_pos - goal_pos)
         
         max_dist = 1.0
 
-        reward_near = self._reward_near_weight * (max_dist - dist_core_arm)
-        reward_dist = self._reward_dist_weight * (max_dist - dist_core_goal)
+        reward_near = self._reward_near_weight * (max_dist - dist_cube_arm)
+        reward_dist = self._reward_dist_weight * (max_dist - dist_cube_goal)
         reward_ctrl = -self._reward_control_weight * np.square(action).sum()
 
-        gripper_pos = self.data.qpos[15]
+        gripper_pos = self.data.qpos[7]
         desired_closed_pos = 0.04
         reward_grip = -self._reward_grip_weight * abs(gripper_pos - desired_closed_pos)
 
@@ -108,21 +111,21 @@ class DianaEnv(MujocoEnv, utils.EzPickle):
         return reward, reward_info
     
     def reset_model(self):
-        qpos = self.init_qpos
 
         self.goal_pos = np.array([0, 0])
-        self.table_pos = self.get_body_com("table")
+        self.table_pos = self.data.geom("table").xpos
         while True:
-            self.core_pos = np.concatenate(
+            self.cube_pos = np.concatenate(
                 [
                     self.np_random.uniform(low=-0.4, high=-0.1, size=1),
                     self.np_random.uniform(low=-0.1, high=0.1, size=1),
                 ]
             )
-            if np.linalg.norm(self.core_pos - self.goal_pos) > 0.05:
+            if np.linalg.norm(self.cube_pos - self.goal_pos) > 0.05:
                 break
 
-        qpos[[18, 19]] = self.core_pos
+        qpos = self.init_qpos
+        qpos[[10, 11]] = self.cube_pos
         qvel = self.init_qvel
         self.set_state(qpos, qvel)
         return self._get_obs()
