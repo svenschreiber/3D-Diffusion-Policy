@@ -6,6 +6,7 @@ from gymnasium.spaces import Box
 import os
 import numpy as np
 from typing import Union, Dict
+import mujoco
 
 DEFAULT_CAMERA_CONFIG = {
     "trackbodyid": -1,
@@ -18,8 +19,6 @@ class DianaEnv(MujocoEnv, utils.EzPickle):
             xml_file: str = "setup_final_poncho.xml",
             frame_skip: int = 5,
             default_camera_config: Dict[str, Union[float, int]] = DEFAULT_CAMERA_CONFIG,
-            reward_near_weight : float    = 1.0,
-            reward_grip_weight : float    = 0.5,
             reward_dist_weight : float    = 2.0,
             reward_control_weight : float = 0.001,
             **kwargs,
@@ -29,15 +28,11 @@ class DianaEnv(MujocoEnv, utils.EzPickle):
             xml_file, 
             frame_skip, 
             default_camera_config, 
-            reward_near_weight, 
-            reward_grip_weight,
             reward_dist_weight, 
             reward_control_weight, 
             **kwargs
         )
 
-        self._reward_near_weight = reward_near_weight
-        self._reward_grip_weight = reward_grip_weight
         self._reward_dist_weight = reward_dist_weight
         self._reward_control_weight = reward_control_weight
 
@@ -51,9 +46,17 @@ class DianaEnv(MujocoEnv, utils.EzPickle):
             **kwargs,
         )
 
-        obs_dim = (self.model.nq + self.model.nv,)
-        self.observation_space = Box(low=-np.inf, high=np.inf, shape=obs_dim, dtype=np.float64)
-        
+        self.active_joints = np.arange(8, 16)
+        self.initial_pos = np.array([-0.785, 0, 0, 1.52, 0, -1.52, 0, 0])
+
+        # Observation Space
+        # - 8 qpos (right arm)
+        # - 8 qvel (right arm)
+        # - 3 ee pos
+        # - 3 goal pos
+        # - 1 ee to goal distance
+        obs_dim = (len(self.active_joints) * 2 + 7,)
+        self.observation_space = Box(low=-np.inf, high=np.inf, shape=obs_dim, dtype=np.float32)
 
         self.metadata = {
             "render_modes": [
@@ -65,75 +68,57 @@ class DianaEnv(MujocoEnv, utils.EzPickle):
             "render_fps": int(np.round(1.0 / self.dt)),
         }
     
-    def cube_out_of_range(self, cube, x_bounds, y_bounds, z_bounds):
-        return not ((cube[0] >= x_bounds[0] and cube[0] < x_bounds[1]) and \
-                    (cube[1] >= y_bounds[0] and cube[1] < y_bounds[1]) and \
-                    (cube[2] >= z_bounds[0] and cube[2] < z_bounds[1]))
-
     def step(self, action):
+        action[:8] = 0
         self.do_simulation(action, self.frame_skip)
 
-        observation = self._get_obs()
-        reward, reward_info = self._get_rew(observation)
+        obs = self.get_obs()
+        reward, reward_info = self.get_reward(obs)
         info = reward_info
 
         if self.render_mode == "human":
             self.render()
-        return observation, reward, False, self.cube_out_of_range(observation[10:13], [-0.5, 0.2], [-0.2, 0.2], [-0.2, 2]), info
+        return obs, reward, obs[-1] < 0.1, False, info
 
-    def _get_rew(self, action):
-        cube_pos = self.get_body_com("cube")
-        arm_r_pos = self.get_body_com("q_gripper_r_finger")
-        goal_pos = self.get_body_com("goal")
+    def get_reward(self, obs):
+        reward_dist = -self._reward_dist_weight * obs[-1]
+        reward_ctrl = -self._reward_control_weight * np.square(obs[:16]).sum()
 
-        dist_cube_arm = np.linalg.norm(cube_pos - arm_r_pos)
-        dist_cube_goal = np.linalg.norm(cube_pos - goal_pos)
-        
-        max_dist = 1.0
-
-        reward_near = self._reward_near_weight * (max_dist - dist_cube_arm)
-        reward_dist = self._reward_dist_weight * (max_dist - dist_cube_goal)
-        reward_ctrl = -self._reward_control_weight * np.square(action).sum()
-
-        gripper_pos = self.data.qpos[7]
-        desired_closed_pos = 0.04
-        reward_grip = -self._reward_grip_weight * abs(gripper_pos - desired_closed_pos)
-
-        reward = reward_near + reward_dist + reward_ctrl + reward_grip
+        reward = reward_dist + reward_ctrl
 
         reward_info = {
             "reward_dist": reward_dist,
             "reward_ctrl": reward_ctrl,
-            "reward_near": reward_near,
-            "reward_grip": reward_grip,
         }
 
         return reward, reward_info
     
     def reset_model(self):
+        goal_offset = np.concatenate(
+            [
+                self.np_random.uniform(low=-0.75, high=-0.45, size=1),
+                self.np_random.uniform(low=-0.7, high=-0.5, size=1),
+                self.np_random.uniform(low=0.9, high=1.2, size=1),
+            ]
+        )
 
-        self.goal_pos = np.array([0, 0])
-        self.table_pos = self.data.geom("table").xpos
-        while True:
-            self.cube_pos = np.concatenate(
-                [
-                    self.np_random.uniform(low=-0.4, high=-0.1, size=1),
-                    self.np_random.uniform(low=-0.1, high=0.1, size=1),
-                ]
-            )
-            if np.linalg.norm(self.cube_pos - self.goal_pos) > 0.05:
-                break
-
+        self.model.site("target").pos = goal_offset
+        mujoco.mj_forward(self.model, self.data)
         qpos = self.init_qpos
-        qpos[[10, 11]] = self.cube_pos
+        qpos[8:16] = self.initial_pos
         qvel = self.init_qvel
         self.set_state(qpos, qvel)
-        return self._get_obs()
+        return self.get_obs()
 
-    def _get_obs(self):
+    def get_obs(self):
+        ee_pos = self.data.body("arm_r_link_7").xpos
+        goal_pos = self.data.site("target").xpos
         return np.concatenate(
             [
-                self.data.qpos.flatten(),
-                self.data.qvel.flatten(),
+                self.data.qpos.flatten()[self.active_joints],
+                self.data.qvel.flatten()[self.active_joints],
+                ee_pos,
+                goal_pos,
+                (np.linalg.norm(goal_pos - ee_pos),),
             ]
         )
