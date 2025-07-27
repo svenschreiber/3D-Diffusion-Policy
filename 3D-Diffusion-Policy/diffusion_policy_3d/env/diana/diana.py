@@ -19,8 +19,6 @@ class DianaEnv(MujocoEnv, utils.EzPickle):
             xml_file: str = "setup_final_poncho.xml",
             frame_skip: int = 5,
             default_camera_config: Dict[str, Union[float, int]] = DEFAULT_CAMERA_CONFIG,
-            reward_dist_weight : float    = 2.0,
-            reward_control_weight : float = 0.001,
             **kwargs,
         ):
         utils.EzPickle.__init__(
@@ -28,13 +26,8 @@ class DianaEnv(MujocoEnv, utils.EzPickle):
             xml_file, 
             frame_skip, 
             default_camera_config, 
-            reward_dist_weight, 
-            reward_control_weight, 
             **kwargs
         )
-
-        self._reward_dist_weight = reward_dist_weight
-        self._reward_control_weight = reward_control_weight
 
         curr_dir = os.path.dirname(os.path.abspath(__file__))
         MujocoEnv.__init__(
@@ -78,20 +71,20 @@ class DianaEnv(MujocoEnv, utils.EzPickle):
 
         if self.render_mode == "human":
             self.render()
-        return obs, reward, obs[-1] < 0.1, False, info
+        return obs, reward, obs[-1] < 0.02, False, info
 
     def get_reward(self, obs):
-        reward_dist = -self._reward_dist_weight * obs[-1]
-        reward_ctrl = -self._reward_control_weight * np.square(obs[:16]).sum()
-
-        reward = reward_dist + reward_ctrl
+        dist = obs[-1]
+        ee_vel = obs[14]
+        n_contacts = len(self.data.contact)
 
         reward_info = {
-            "reward_dist": reward_dist,
-            "reward_ctrl": reward_ctrl,
+            "reward_dist": -1.0 * dist,
+            "reward_ee_vel": -0.01 * ee_vel,
+            "reward_contacts": -5.0 * n_contacts,
         }
 
-        return reward, reward_info
+        return sum(reward_info.values()), reward_info
     
     def reset_model(self):
         goal_offset = np.concatenate(
